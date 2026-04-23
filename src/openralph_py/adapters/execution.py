@@ -55,6 +55,8 @@ def run_subprocess(spec: CommandSpec) -> RawSubprocessResult:
             cwd=str(spec.cwd),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=spec.timeout_seconds,
             check=False,
             env=env,

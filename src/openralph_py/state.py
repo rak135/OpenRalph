@@ -23,6 +23,9 @@ class PersistedState:
     last_run_at: float | None = None
     last_task_id: str | None = None
     last_exit_code: int | None = None
+    # Phase 3 additions
+    last_stop_reason: str | None = None  # StopReason value from last run_loop call
+    session_id: str | None = None        # Unique ID for each run_loop invocation
 
     def to_dict(self) -> dict:
         return asdict(self)

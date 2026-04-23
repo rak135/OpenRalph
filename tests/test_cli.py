@@ -125,3 +125,27 @@ def test_run_and_status_cycle(tmp_path: Path, fake_adapter, capsys):
     out = capsys.readouterr().out
     assert "3/3 complete" in out
     assert "Done marker: present" in out
+
+
+def test_run_multi_iteration_accepts_no_progress_threshold(tmp_path: Path, fake_adapter, capsys):
+    plan = tmp_path / "plan.md"
+    _write_plan(plan)
+    workspace = tmp_path / "ws"
+    assert cli.main(["init", "--from", str(plan), "--workspace", str(workspace)]) == 0
+
+    rc = cli.main(
+        [
+            "run",
+            "--workspace",
+            str(workspace),
+            "--adapter",
+            "fake-cli",
+            "--max-iterations",
+            "2",
+            "--no-progress-threshold",
+            "3",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "No-progress threshold: 3" in out
