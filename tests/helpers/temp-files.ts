@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Test helper for managing temporary files and directories.
  * Provides automatic cleanup after tests.
  */
@@ -217,10 +217,10 @@ export async function withTempDir<T>(
  * These are the control/state files that Ralph uses during operation.
  */
 export const RALPH_FILES = [
-  ".ralph-lock",
-  ".ralph-pause",
-  ".ralph-done",
-  ".ralph-state.json",
+  ".ralph/lock",
+  ".ralph/pause",
+  ".ralph/done",
+  ".ralph/state.json",
 ] as const;
 
 /**
@@ -241,7 +241,7 @@ export const RALPH_FILES = [
  *   });
  *
  *   it("should work with ralph files", async () => {
- *     // Test creates .ralph-done, .ralph-pause, etc.
+ *     // Test creates .ralph/done, .ralph-pause, etc.
  *     // Files are automatically cleaned up after test
  *   });
  * });
@@ -257,3 +257,4 @@ export async function cleanupRalphFiles(): Promise<void> {
     }
   }
 }
+

@@ -1,5 +1,8 @@
 import type { ErrorHandlingConfig, SessionConfig, UIConfig } from './lib/config/schema';
 import type { SandboxConfig, ActiveAgentState, RateLimitState } from './components/tui-types';
+import { getStateFilePath } from './lib/paths';
+import { dirname } from 'node:path';
+import { mkdirSync } from 'node:fs';
 
 export type PersistedState = {
   startTime: number; // When run started (epoch ms)
@@ -71,7 +74,7 @@ export type ToolEvent = {
   verbose?: boolean; // Whether this is a verbose/debug event (dim styling)
 };
 
-export const STATE_FILE = ".ralph-state.json";
+export const STATE_FILE = getStateFilePath(process.cwd());
 export const MAX_EVENTS = 200;
 
 /**
@@ -105,6 +108,7 @@ export async function loadState(): Promise<PersistedState | null> {
 }
 
 export async function saveState(state: PersistedState): Promise<void> {
+  mkdirSync(dirname(STATE_FILE), { recursive: true });
   await Bun.write(STATE_FILE, JSON.stringify(state, null, 2));
 }
 

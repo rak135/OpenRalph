@@ -1,4 +1,5 @@
 import type { TaskStatus } from "../types/task-status";
+import type { FileAssertion, VerifierFeedback } from "../plan";
 export type { TaskStatus };
 
 /**
@@ -45,6 +46,10 @@ export type UiTask = {
   originalId?: string;
   /** Verification steps from PRD */
   steps?: string[];
+  /** Deterministic exact-content assertions from PRD */
+  verifications?: FileAssertion[];
+  /** Durable verifier rejection details from PRD */
+  verifierFeedback?: VerifierFeedback;
 };
 
 /**

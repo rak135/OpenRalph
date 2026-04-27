@@ -32,16 +32,17 @@ import type { Plugin } from "@opencode-ai/plugin"
  * Protects user-configurable files from being overwritten or deleted by:
  * - Write tool: Blocks full file overwrites
  * - Bash tool: Blocks commands that overwrite/delete protected files
- * - Edit tool on prd.json: Limited to ONE TASK per session (multiple edits to same task OK)
+ * - Edit tool on .ralph/prd.json: Limited to ONE TASK per session (multiple edits to same task OK)
  * 
- * The one-task-per-session rule for prd.json ensures Ralph makes focused,
+ * The one-task-per-session rule for .ralph/prd.json ensures Ralph makes focused,
  * incremental progress. Multiple edits to the SAME task are allowed
  * (e.g., pending → active → done lifecycle transitions).
  * 
  * Protected files by default:
- * - prd.json - The PRD plan file (1 task per session)
- * - progress.txt - Progress tracking
- * - .ralph-prompt.md - Prompt template
+ * - .ralph/prd.json - The PRD plan file (1 task per session)
+ * - .ralph/progress.txt - Progress tracking
+ * - .ralph/prompt.md - Prompt template
+ * - .ralph/state.json - Runtime state
  * - AGENTS.md - Agent configuration
  * 
  * To customize, modify the PROTECTED_FILES array below.
@@ -49,21 +50,25 @@ import type { Plugin } from "@opencode-ai/plugin"
 
 // Files that should be protected from AI modification
 const PROTECTED_FILES = [
+  ".ralph/prd.json",
+  ".ralph/progress.txt",
+  ".ralph/prompt.md",
+  ".ralph/state.json",
   "prd.json",
   "progress.txt",
   ".ralph-prompt.md",
   "AGENTS.md",
 ]
 
-// Session-level tracking for prd.json task edits
+// Session-level tracking for .ralph/prd.json task edits
 // Tracks which task INDEX is being edited this session (resets when OpenCode restarts)
 // This allows multiple edits to the SAME task (e.g., pending → active → done)
 // but blocks editing DIFFERENT tasks in the same session
 let activeTaskIndex: number | null = null
-const PRD_FILE_NAME = "prd.json"
+const PRD_FILE_NAMES = [".ralph/prd.json", "prd.json"]
 
 /**
- * Find which task index in prd.json contains the given content.
+ * Find which task index in .ralph/prd.json contains the given content.
  * Reads the file, parses JSON, and searches each item for the content.
  * Returns the 0-based index of the matching task, or null if not found/ambiguous.
  */
@@ -228,16 +233,18 @@ export const RalphWriteGuardrail: Plugin = async () => {
         }
       }
 
-      // Guard against editing DIFFERENT tasks in prd.json within a single session
+      // Guard against editing DIFFERENT tasks in .ralph/prd.json within a single session
       // Ralph should focus on ONE task per iteration, but can make multiple edits to that task
       // (e.g., pending → active → done lifecycle is allowed)
       if (input.tool === "edit") {
         const filePath = output.args?.filePath as string | undefined
         if (filePath) {
           const normalizedPath = filePath.replace(/\\\\/g, "/")
-          const isPrdFile = normalizedPath === PRD_FILE_NAME || 
-                           normalizedPath.endsWith("/" + PRD_FILE_NAME) ||
-                           normalizedPath.endsWith("\\\\" + PRD_FILE_NAME)
+          const isPrdFile = PRD_FILE_NAMES.some((name) =>
+            normalizedPath === name ||
+            normalizedPath.endsWith("/" + name) ||
+            normalizedPath.endsWith("\\\\" + name)
+          )
           
           if (isPrdFile) {
             // Find which task is being edited by matching oldString against file content
@@ -253,7 +260,7 @@ export const RalphWriteGuardrail: Plugin = async () => {
                 } else if (activeTaskIndex !== taskIndex) {
                   // Trying to edit a DIFFERENT task - block it
                   throw new Error(
-                    \`[Ralph Guardrail] Cannot edit multiple tasks in prd.json in a single session. \\\\n\` +
+                    \`[Ralph Guardrail] Cannot edit multiple tasks in .ralph/prd.json in a single session. \\\\n\` +
                     \`You are already working on task at index \${activeTaskIndex}. \\\\n\` +
                     \`Attempted to edit task at index \${taskIndex}. \\\\n\` +
                     \`Complete the current task first, then Ralph will start a new iteration for the next task.\`

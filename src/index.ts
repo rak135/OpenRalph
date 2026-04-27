@@ -20,6 +20,67 @@ import { forceTerminateDescendants } from "./lib/process-cleanup";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import {
+  ensureRalphWorkspaceDirs,
+  getDonePath,
+  getLegacyDonePath,
+  getLegacyPlanPath,
+  getLegacyProgressPath,
+  getLegacyPromptPath,
+  getLegacyStatePath,
+  getPausePath,
+  getPlanPath,
+  getProgressPath,
+  getPromptPath,
+  resolveCanonicalOrLegacyPath,
+} from "./lib/paths";
+
+type ResolvedRuntimePaths = {
+  planFile: string;
+  progressFile: string;
+  promptFile: string;
+  warnings: string[];
+};
+
+async function resolveRuntimePaths(
+  planFile: string,
+  progressFile: string,
+  promptFile: string,
+  allowLegacyFallback: boolean
+): Promise<ResolvedRuntimePaths> {
+  const warnings: string[] = [];
+
+  if (!allowLegacyFallback) {
+    return { planFile, progressFile, promptFile, warnings };
+  }
+
+  const resolvedPlan = await resolveCanonicalOrLegacyPath(
+    planFile,
+    getLegacyPlanPath(process.cwd())
+  );
+  const resolvedProgress = await resolveCanonicalOrLegacyPath(
+    progressFile,
+    getLegacyProgressPath(process.cwd())
+  );
+  const resolvedPrompt = await resolveCanonicalOrLegacyPath(
+    promptFile,
+    getLegacyPromptPath(process.cwd())
+  );
+
+  if (resolvedPlan.usedLegacy || resolvedProgress.usedLegacy || resolvedPrompt.usedLegacy) {
+    warnings.push(
+      "Legacy root-level Ralph files detected. Using compatibility paths for this run. " +
+        "Run `ralph init --force` to migrate to canonical .ralph/ layout."
+    );
+  }
+
+  return {
+    planFile: resolvedPlan.path,
+    progressFile: resolvedProgress.path,
+    promptFile: resolvedPrompt.path,
+    warnings,
+  };
+}
 
 async function registerGhosttyTerminal(): Promise<void> {
   try {
@@ -208,7 +269,14 @@ async function runReset(options: {
   }
 
   // 1. Always remove internal state files
-  const stateFiles = [STATE_FILE, ".ralph-pause", ".ralph-done"];
+  const stateFiles = [
+    STATE_FILE,
+    getPausePath(process.cwd()),
+    getDonePath(process.cwd()),
+    getLegacyStatePath(process.cwd()),
+    getLegacyDonePath(process.cwd()),
+    ".ralph-pause",
+  ];
   for (const file of stateFiles) {
     if (await safeRemove(file)) {
       result.removed.push(file);
@@ -359,12 +427,12 @@ async function main() {
       alias: "p",
       type: "string",
       description: "Path to the plan file",
-      default: config.plan || "prd.json",
+      default: config.plan || getPlanPath(process.cwd()),
     })
     .option("progress", {
       type: "string",
       description: "Path to the progress log file",
-      default: config.progress || "progress.txt",
+      default: config.progress || getProgressPath(process.cwd()),
     })
     .option("adapter", {
       type: "string",
@@ -385,7 +453,7 @@ async function main() {
     .option("prompt-file", {
       type: "string",
       description: "Path to prompt file",
-      default: config.promptFile || ".ralph-prompt.md",
+      default: config.promptFile || getPromptPath(process.cwd()),
     })
     .option("reset", {
       alias: "r",
@@ -471,11 +539,33 @@ async function main() {
     .strict()
     .parse();
 
+  ensureRalphWorkspaceDirs(process.cwd());
+
+  const rawPlanFile = argv.plan as string;
+  const rawProgressFile = argv.progress as string;
+  const rawPromptFile = argv.promptFile as string;
+  const userArgs = process.argv.slice(2);
+  const userSpecifiedPlan = userArgs.includes("--plan") || userArgs.includes("-p");
+  const userSpecifiedProgress = userArgs.includes("--progress");
+  const userSpecifiedPrompt = userArgs.includes("--prompt-file");
+  const allowLegacyFallback = !userSpecifiedPlan && !userSpecifiedProgress && !userSpecifiedPrompt;
+
+  const resolvedPaths = await resolveRuntimePaths(
+    rawPlanFile,
+    rawProgressFile,
+    rawPromptFile,
+    allowLegacyFallback
+  );
+
+  for (const warning of resolvedPaths.warnings) {
+    console.warn(`Warning: ${warning}`);
+  }
+
   if (argv._[0] === "init") {
     const result = await runInit({
-      planFile: argv.plan,
-      progressFile: argv.progress,
-      promptFile: argv.promptFile as string,
+      planFile: rawPlanFile,
+      progressFile: rawProgressFile,
+      promptFile: rawPromptFile,
       pluginFile: ".opencode/plugin/ralph-write-guardrail.ts",
       agentsFile: "AGENTS.md",
       gitignoreFile: ".gitignore",
@@ -497,9 +587,9 @@ async function main() {
   // Handle prune command or --reset flag: cleanup generated files and exit
   if (argv._[0] === "prune" || argv.reset) {
     const resetResult = await runReset({
-      planFile: argv.plan,
-      progressFile: argv.progress,
-      promptFile: argv.promptFile as string,
+      planFile: resolvedPaths.planFile,
+      progressFile: resolvedPaths.progressFile,
+      promptFile: resolvedPaths.promptFile,
       pluginFile: ".opencode/plugin/ralph-write-guardrail.ts",
       agentsFile: "AGENTS.md",
     });
@@ -523,7 +613,7 @@ async function main() {
   }
 
   // Initialize session lock
-  const lock = new SessionLock(process.cwd(), config.session?.lockFile || '.ralph-lock');
+  const lock = new SessionLock(process.cwd(), config.session?.lockFile || '.ralph/lock');
   const lockResult = await lock.acquire(argv.force as boolean);
   
   if (!lockResult.acquired) {
@@ -562,7 +652,7 @@ async function main() {
     let shouldReset = false; // Reset is handled above, this is for auto-reset prompts
 
     if (existingState && !shouldReset) {
-      const samePlan = existingState.planFile === argv.plan;
+      const samePlan = existingState.planFile === resolvedPaths.planFile;
 
       if (autoYes) {
         if (samePlan) {
@@ -606,9 +696,9 @@ async function main() {
     setVerbose(argv.verbose as boolean);
     
     initLog(isNewRun);
-    log("main", "Ralph starting", { plan: argv.plan, model: argv.model, reset: shouldReset });
+    log("main", "Ralph starting", { plan: resolvedPaths.planFile, model: argv.model, reset: shouldReset });
     if (!argv.debug) {
-      await warnIfPlanOrProgressMissing(argv.plan, argv.progress);
+      await warnIfPlanOrProgressMissing(resolvedPaths.planFile, resolvedPaths.progressFile);
     }
     
     // Create fresh state if needed
@@ -619,7 +709,7 @@ async function main() {
         startTime: Date.now(),
         initialCommitHash: headHash,
         iterationTimes: [],
-        planFile: argv.plan,
+        planFile: resolvedPaths.planFile,
         totalPausedMs: 0,
         lastSaveTime: Date.now(),
       };
@@ -630,11 +720,11 @@ async function main() {
 
     // Create LoopOptions from CLI arguments
     const loopOptions: LoopOptions = {
-      planFile: argv.plan,
-      progressFile: argv.progress,
+      planFile: resolvedPaths.planFile,
+      progressFile: resolvedPaths.progressFile,
       model: argv.model,
       prompt: argv.prompt || "",
-      promptFile: argv.promptFile,
+      promptFile: resolvedPaths.promptFile,
       serverUrl: argv.server,
       serverTimeoutMs: argv.serverTimeout,
       adapter: argv.adapter,
@@ -979,7 +1069,7 @@ async function main() {
         // Handle 'p' for pause toggle
         if (char === "p" || char === "P") {
           log("main", "Fallback stdin: toggle pause");
-          const PAUSE_FILE = ".ralph-pause";
+          const PAUSE_FILE = getPausePath(process.cwd());
           const file = Bun.file(PAUSE_FILE);
           const exists = await file.exists();
           if (exists) {
@@ -1093,7 +1183,7 @@ async function main() {
 
     // Start in ready state - create pause file and set initial state
     // User must press 'p' to begin the loop
-    const PAUSE_FILE = ".ralph-pause";
+    const PAUSE_FILE = getPausePath(process.cwd());
     await Bun.write(PAUSE_FILE, String(process.pid));
     stateSetters.setState((prev) => ({
       ...prev,

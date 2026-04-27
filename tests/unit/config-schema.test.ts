@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+﻿import { describe, it, expect } from "bun:test";
 import { ConfigSchema, FallbackAgentsSchema } from "../../src/lib/config/schema";
 
 describe("ConfigSchema", () => {
@@ -6,8 +6,8 @@ describe("ConfigSchema", () => {
     const validConfig = {
       model: "test/model",
       adapter: "opencode-server",
-      plan: "prd.json",
-      progress: "progress.txt",
+      plan: ".ralph/prd.json",
+      progress: ".ralph/progress.txt",
     };
     
     const result = ConfigSchema.safeParse(validConfig);
@@ -26,7 +26,7 @@ describe("ConfigSchema", () => {
       expect(result.data.model).toBe("opencode/claude-opus-4-5");
       expect(result.data.adapter).toBe("opencode-server");
       expect(result.data.errorHandling.strategy).toBe("retry");
-      expect(result.data.session.lockFile).toBe(".ralph-lock");
+      expect(result.data.session.lockFile).toBe(".ralph/lock");
     }
   });
 
@@ -142,3 +142,4 @@ describe("ConfigSchema with fallbackAgents", () => {
     }
   });
 });
+

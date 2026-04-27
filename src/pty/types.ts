@@ -3,6 +3,7 @@ export interface PtyOptions {
   rows?: number;
   cwd?: string;
   env?: Record<string, string>;
+  stdinMode?: "pipe" | "ignore";
 }
 
 export interface PtyProcess {

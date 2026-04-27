@@ -1,9 +1,14 @@
 import { existsSync, mkdirSync } from "fs";
-import { dirname, extname, join } from "path";
+import { basename, dirname, extname, join } from "path";
 import { parsePrdItems, type PrdItem } from "./plan";
+import { extractFileAssertions } from "./verifier";
 import { PLUGIN_TEMPLATE } from "./templates/plugin-template";
 import { AGENTS_TEMPLATE } from "./templates/agents-template";
 import { isRedundantTask } from "./lib/task-deduplication";
+import {
+  ensureRalphWorkspaceDirs,
+  getPlanPath,
+} from "./lib/paths";
 
 // Re-export for backwards compatibility
 export {
@@ -19,6 +24,10 @@ export {
  * Default files protected by the write-guardrail plugin.
  */
 export const DEFAULT_PROTECTED_FILES = [
+  ".ralph/prd.json",
+  ".ralph/progress.txt",
+  ".ralph/prompt.md",
+  ".ralph/state.json",
   "prd.json",
   "progress.txt",
   ".ralph-prompt.md",
@@ -30,7 +39,13 @@ export const DEFAULT_PROTECTED_FILES = [
  * These are runtime files that should not be committed.
  */
 export const GITIGNORE_ENTRIES = [
-  ".ralph*",
+  ".ralph/logs/",
+  ".ralph/tmp/",
+  ".ralph/validation/",
+  ".ralph/state.json",
+  ".ralph/done",
+  ".ralph/pause",
+  ".ralph/lock",
   ".opencode/plugin/ralph-write-guardrail.ts",
 ] as const;
 
@@ -198,20 +213,31 @@ safe_to_delete: true
 ---
 `;
 
-const PROMPT_TEMPLATE = `${GENERATED_PROMPT_MARKER}READ all of {{PLAN_FILE}} and {{PROGRESS_FILE}}.
-Pick ONE task with passes=false (prefer highest-risk/highest-impact).
-Keep changes small: one logical change per commit.
-Update {{PLAN_FILE}} by setting passes=true and adding notes or steps as needed.
-Append a brief entry to {{PROGRESS_FILE}} with what changed and why.
-Run feedback loops before committing:
-- bun run typecheck
-- bun test
-- bun run lint (if missing, note in {{PROGRESS_FILE}} and continue)
-Commit the change (include {{PLAN_FILE}} updates).
-ONLY do one task unless GLARINGLY OBVIOUS steps should run together.
-Quality bar: production code, maintainable, tests when appropriate.
-If you learn a critical operational detail, update AGENTS.md.
-When ALL tasks complete, create .ralph-done and output <promise>COMPLETE</promise>.
+const PROMPT_TEMPLATE = `${GENERATED_PROMPT_MARKER}You are operating inside the current workspace.
+
+Your job is to complete exactly ONE unfinished task from {{PLAN_FILE}} by making real filesystem changes.
+
+Some tasks include deterministic verifications in {{PLAN_FILE}}.
+For exact-content file tasks, satisfy those verifications byte-for-byte.
+For exact-content file tasks, write exactly the requested content. Do not add a trailing newline unless the expected content explicitly includes one. Exact means byte-for-byte exact.
+Ralph will reject passes=true if deterministic verification fails.
+
+
+Do not merely summarize {{PLAN_FILE}} or {{PROGRESS_FILE}}.
+Do not stop after reading files.
+Read {{PLAN_FILE}} and {{PROGRESS_FILE}} only as needed to identify the next unfinished task and existing progress.
+
+Then:
+1. Select exactly one task with passes=false.
+2. Perform the task with real filesystem changes.
+3. Verify the changed files.
+4. Update {{PLAN_FILE}} according to the Ralph workflow.
+5. Append a brief {{PROGRESS_FILE}} entry.
+6. Commit the change if appropriate.
+7. Stop after one logical task unless completion is glaringly obvious.
+
+When all tasks are complete, create .ralph/done and output <promise>COMPLETE</promise>.
+
 NEVER GIT PUSH. ONLY COMMIT.
 `;
 
@@ -225,11 +251,19 @@ function resolvePlanTarget(planFile: string): { planFile: string; warning?: stri
     return { planFile };
   }
 
-  const target = join(dirname(planFile), "prd.json");
+  const target = getPlanPath(dirname(planFile));
   return {
     planFile: target,
     warning: `Preserving markdown plan "${planFile}" and writing PRD JSON to "${target}".`,
   };
+}
+
+function inferWorkspaceDirFromPlanPath(planFile: string): string {
+  const planDir = dirname(planFile);
+  if (basename(planDir) === ".ralph") {
+    return dirname(planDir);
+  }
+  return dirname(planFile);
 }
 
 function ensureParentDir(path: string): void {
@@ -392,12 +426,16 @@ function createTemplateItems(): PrdItem[] {
 }
 
 function createPrdItemsFromTasks(tasks: ExtractedTask[]): PrdItem[] {
-  return tasks.map((task) => ({
-    category: task.category ?? DEFAULT_CATEGORY,
-    description: task.description,
-    steps: [DEFAULT_STEP],
-    passes: task.passes,
-  }));
+  return tasks.map((task) => {
+    const verifications = extractFileAssertions(task.description);
+    return {
+      category: task.category ?? DEFAULT_CATEGORY,
+      description: task.description,
+      steps: [DEFAULT_STEP],
+      passes: task.passes,
+      ...(verifications.length > 0 ? { verifications } : {}),
+    };
+  });
 }
 
 function buildProgressTemplate(planFile: string): string {
@@ -430,6 +468,8 @@ async function writeFileIfNeeded(
 export async function runInit(options: InitOptions): Promise<InitResult> {
   const result: InitResult = { created: [], skipped: [], warnings: [] };
   const resolvedPlan = resolvePlanTarget(options.planFile);
+  ensureRalphWorkspaceDirs(inferWorkspaceDirFromPlanPath(resolvedPlan.planFile));
+
   if (resolvedPlan.warning) {
     result.warnings.push(resolvedPlan.warning);
   }
@@ -470,7 +510,16 @@ export async function runInit(options: InitOptions): Promise<InitResult> {
   let prdItems: PrdItem[] = [];
 
   if (parsedItems) {
-    prdItems = parsedItems;
+    // For prd.json-sourced items, add verifications if not already stored
+    prdItems = parsedItems.map((item) => ({
+      ...item,
+      verifications:
+        item.verifications && item.verifications.length > 0
+          ? item.verifications
+          : extractFileAssertions(item.description).length > 0
+            ? extractFileAssertions(item.description)
+            : undefined,
+    }));
   } else if (sourceText) {
     const tasks = extractTasksFromText(sourceText);
     if (tasks.length > 0) {

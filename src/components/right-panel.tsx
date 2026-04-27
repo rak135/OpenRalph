@@ -7,6 +7,11 @@ import type { ToolEvent } from "../state";
 import { EnhancedLog } from "./enhanced-log";
 import { StatusIndicator } from "./animated/status-indicator";
 import { TerminalPane } from "./terminal-pane";
+import {
+  buildVerifierFeedbackLines,
+  formatVerificationSummary,
+  type OperatorUiSnapshot,
+} from "../ui/operator-state";
 
 // =====================================================
 // ACCEPTANCE CRITERIA PARSING
@@ -88,6 +93,7 @@ function getPriorityColor(priority: number, theme: ReturnType<typeof useTheme>["
 
 export type RightPanelProps = {
   selectedTask: UiTask | null;
+  runtimeSnapshot?: OperatorUiSnapshot | null;
   viewMode: DetailsViewMode;
   status: RalphStatus;
   adapterMode: "sdk" | "pty";
@@ -126,12 +132,79 @@ function getStatusColorFromTheme(status: TaskStatus, theme: ReturnType<typeof us
   }
 }
 
-function NoSelection() {
+function NoSelection(props: { runtimeSnapshot?: OperatorUiSnapshot | null }) {
   const { theme } = useTheme();
   const t = () => theme();
 
   return (
-    <box flexGrow={1} flexDirection="column" padding={2}><box marginBottom={1}><text fg={t().text}>Getting Started</text></box><box marginBottom={2}><text fg={t().textMuted}>No tasks available. Run `ralph init` or add tasks to your plan.</text></box><text fg={t().textMuted}>Press q to quit</text></box>
+    <box flexGrow={1} flexDirection="column" padding={2}><RuntimeSummary snapshot={props.runtimeSnapshot} /><box marginBottom={1}><text fg={t().text}>Getting Started</text></box><box marginBottom={2}><text fg={t().textMuted}>No tasks available. Run `ralph init` or add tasks to your plan.</text></box><text fg={t().textMuted}>Press q to quit</text></box>
+  );
+}
+
+function RuntimePathRow(props: { label: string; value: string; color?: string }) {
+  const { theme } = useTheme();
+  const t = () => theme();
+
+  return (
+    <box marginBottom={0}>
+      <text>
+        <span style={{ fg: t().textMuted }}>{props.label}: </span>
+        <span style={{ fg: props.color ?? t().text }}>{props.value}</span>
+      </text>
+    </box>
+  );
+}
+
+function RuntimeSummary(props: { snapshot?: OperatorUiSnapshot | null }) {
+  const { theme } = useTheme();
+  const t = () => theme();
+
+  const doneColor = () => {
+    switch (props.snapshot?.doneMarkerStatus) {
+      case "present":
+        return t().warning;
+      case "accepted":
+        return t().success;
+      case "invalidated":
+        return t().error;
+      case "absent":
+      default:
+        return t().textMuted;
+    }
+  };
+
+  return (
+    <Show when={props.snapshot}>
+      <box flexDirection="column" marginBottom={2}>
+        <box marginBottom={1}>
+          <text fg={t().primary}>Runtime Truth</text>
+        </box>
+        <RuntimePathRow label="Plan" value={props.snapshot!.planFile} color={props.snapshot!.planUsesLegacyRoot ? t().warning : t().text} />
+        <RuntimePathRow label="Progress" value={props.snapshot!.progressFile} color={props.snapshot!.progressUsesLegacyRoot ? t().warning : t().text} />
+        <RuntimePathRow label="State" value={props.snapshot!.stateFile} color={props.snapshot!.stateFileExists ? t().text : t().textMuted} />
+        <RuntimePathRow label="Logs" value={props.snapshot!.logsDir} />
+        <RuntimePathRow label="Done" value={props.snapshot!.doneMarkerStatus} color={doneColor()} />
+        <Show when={props.snapshot!.warnings.length > 0}>
+          <box marginTop={1}>
+            <text fg={t().warning}>{props.snapshot!.warnings[0]}</text>
+          </box>
+        </Show>
+        <Show when={props.snapshot!.progressTail.length > 0}>
+          <box flexDirection="column" marginTop={1}>
+            <box marginBottom={1}>
+              <text fg={t().primary}>Progress Tail</text>
+            </box>
+            <For each={props.snapshot!.progressTail}>
+              {(line) => (
+                <box paddingLeft={1}>
+                  <text fg={t().text}>{line}</text>
+                </box>
+              )}
+            </For>
+          </box>
+        </Show>
+      </box>
+    </Show>
   );
 }
 
@@ -245,14 +318,14 @@ function MetadataBadge(props: {
 // VERIFICATION STEPS COMPONENT
 // =====================================================
 
-function VerificationSteps(props: { steps: string[] }) {
+function TaskSteps(props: { steps: string[] }) {
   const { theme } = useTheme();
   const t = () => theme();
 
   return (
     <box flexDirection="column" marginTop={1}>
       <box marginBottom={1}>
-        <text fg={t().primary}>Verification Steps</text>
+        <text fg={t().primary}>Task Steps</text>
       </box>
       <For each={props.steps}>
         {(step, index) => (
@@ -273,11 +346,58 @@ function VerificationSteps(props: { steps: string[] }) {
   );
 }
 
+function ExactVerifications(props: { task: UiTask }) {
+  const { theme } = useTheme();
+  const t = () => theme();
+
+  return (
+    <Show when={props.task.verifications && props.task.verifications.length > 0}>
+      <box flexDirection="column" marginTop={1}>
+        <box marginBottom={1}>
+          <text fg={t().primary}>Deterministic Verifications</text>
+        </box>
+        <For each={props.task.verifications}>
+          {(assertion) => (
+            <box paddingLeft={1} marginBottom={0}>
+              <text fg={t().text}>{formatVerificationSummary(assertion)}</text>
+            </box>
+          )}
+        </For>
+      </box>
+    </Show>
+  );
+}
+
+function VerifierFeedbackSection(props: { task: UiTask }) {
+  const { theme } = useTheme();
+  const t = () => theme();
+  const lines = createMemo(() =>
+    props.task.verifierFeedback ? buildVerifierFeedbackLines(props.task.verifierFeedback) : []
+  );
+
+  return (
+    <Show when={lines().length > 0}>
+      <box flexDirection="column" marginTop={1}>
+        <box marginBottom={1}>
+          <text fg={t().error}>Verifier Feedback</text>
+        </box>
+        <For each={lines()}>
+          {(line, index) => (
+            <box paddingLeft={1} marginBottom={0}>
+              <text fg={index() === 0 ? t().warning : t().text}>{line}</text>
+            </box>
+          )}
+        </For>
+      </box>
+    </Show>
+  );
+}
+
 // =====================================================
 // ENHANCED TASK DETAILS COMPONENT
 // =====================================================
 
-function TaskDetails(props: { task: UiTask }) {
+function TaskDetails(props: { task: UiTask; runtimeSnapshot?: OperatorUiSnapshot | null }) {
   const { theme } = useTheme();
   const t = () => theme();
 
@@ -341,6 +461,8 @@ function TaskDetails(props: { task: UiTask }) {
   return (
     <box flexDirection="column" padding={1} flexGrow={1}>
       <scrollbox flexGrow={1}>
+        <RuntimeSummary snapshot={props.runtimeSnapshot} />
+
         {/* Task Title */}
         <box marginBottom={1}>
           {renderedTitle()}
@@ -424,8 +546,12 @@ function TaskDetails(props: { task: UiTask }) {
         </box>
 
         {/* Verification Steps */}
+        <ExactVerifications task={props.task} />
+
+        <VerifierFeedbackSection task={props.task} />
+
         <Show when={props.task.steps && props.task.steps.length > 0}>
-          <VerificationSteps steps={props.task.steps!} />
+          <TaskSteps steps={props.task.steps!} />
         </Show>
 
         {/* Acceptance Criteria */}
@@ -477,6 +603,6 @@ export function RightPanel(props: RightPanelProps) {
   const title = () => `Details ${formatViewMode(props.viewMode)}`;
 
   return (
-    <box title={title()} flexGrow={2} flexShrink={1} minWidth={40} flexDirection="column" backgroundColor={t().background} border borderColor={t().primary}><Switch fallback={<NoSelection />}><Match when={props.viewMode === "details"}><Show when={props.selectedTask} fallback={<NoSelection />}>{(task) => <TaskDetails task={task()} />}</Show></Match><Match when={props.viewMode === "output"}><OutputView adapterMode={props.adapterMode} events={props.events} isIdle={props.isIdle} status={props.status} errorRetryAt={props.errorRetryAt} terminalBuffer={props.terminalBuffer} terminalCols={props.terminalCols} terminalRows={props.terminalRows}/></Match><Match when={props.viewMode === "prompt"}><PromptView promptText={props.promptText} task={props.selectedTask} /></Match></Switch></box>
+    <box title={title()} flexGrow={2} flexShrink={1} minWidth={40} flexDirection="column" backgroundColor={t().background} border borderColor={t().primary}><Switch fallback={<NoSelection runtimeSnapshot={props.runtimeSnapshot} />}><Match when={props.viewMode === "details"}><Show when={props.selectedTask} fallback={<NoSelection runtimeSnapshot={props.runtimeSnapshot} />}>{(task) => <TaskDetails task={task()} runtimeSnapshot={props.runtimeSnapshot} />}</Show></Match><Match when={props.viewMode === "output"}><OutputView adapterMode={props.adapterMode} events={props.events} isIdle={props.isIdle} status={props.status} errorRetryAt={props.errorRetryAt} terminalBuffer={props.terminalBuffer} terminalCols={props.terminalCols} terminalRows={props.terminalRows}/></Match><Match when={props.viewMode === "prompt"}><PromptView promptText={props.promptText} task={props.selectedTask} /></Match></Switch></box>
   );
 }

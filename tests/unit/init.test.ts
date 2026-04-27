@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+﻿import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { runInit, isGeneratedPrd, isGeneratedPrompt, isGeneratedProgress, isGeneratedPlugin, isGeneratedAgents, GENERATED_PROMPT_MARKER, GENERATED_PLUGIN_MARKER, GENERATED_AGENTS_MARKER, GITIGNORE_ENTRIES, GITIGNORE_HEADER, buildGitignoreBlock } from "../../src/init";
 import { TempDir } from "../helpers/temp-files";
 
@@ -18,8 +18,8 @@ describe("runInit", () => {
       "plan.md",
       "# Plan\n- [ ] First task\n- [ ] Second task\n"
     );
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
 
@@ -32,7 +32,7 @@ describe("runInit", () => {
       gitignoreFile: tempDir.path(".gitignore"),
     });
 
-    const prdPath = tempDir.path("prd.json");
+    const prdPath = tempDir.path(".ralph/prd.json");
     const prdContent = await Bun.file(prdPath).json();
     expect(prdContent.items.length).toBe(2);
     expect(prdContent.items[0]).toMatchObject({
@@ -41,6 +41,200 @@ describe("runInit", () => {
     });
 
     expect(result.created).toContain(prdPath);
+  });
+
+  it("should generate an action-first default prompt template", async () => {
+    const planPath = await tempDir.write("plan.md", "# Plan\n- [ ] First task\n");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
+    const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
+    const agentsPath = tempDir.path("AGENTS.md");
+
+    await runInit({
+      planFile: planPath,
+      progressFile: progressPath,
+      promptFile: promptPath,
+      pluginFile: pluginPath,
+      agentsFile: agentsPath,
+      gitignoreFile: tempDir.path(".gitignore"),
+    });
+
+    const promptContent = await Bun.file(promptPath).text();
+    expect(promptContent).toContain("Your job is to complete exactly ONE unfinished task from {{PLAN_FILE}}");
+    expect(promptContent).toContain("Some tasks include deterministic verifications in {{PLAN_FILE}}.");
+    expect(promptContent).toContain("Ralph will reject passes=true if deterministic verification fails.");
+    expect(promptContent.match(/Some tasks include deterministic verifications in \{\{PLAN_FILE\}\}\./g)?.length).toBe(1);
+    expect(promptContent).toContain("Do not add a trailing newline unless the expected content explicitly includes one");
+    expect(promptContent).toContain("Do not merely summarize {{PLAN_FILE}} or {{PROGRESS_FILE}}.");
+    expect(promptContent).not.toContain("READ all of {{PLAN_FILE}} and {{PROGRESS_FILE}}.");
+  });
+
+  it("should extract create exact verification from markdown init source", async () => {
+    const planPath = await tempDir.write(
+      "plan.md",
+      "# Strict exact creation\n\n- [ ] Create `alpha.txt` in the workspace root containing exactly `alpha`.\n"
+    );
+
+    await runInit({
+      planFile: planPath,
+      progressFile: tempDir.path(".ralph/progress.txt"),
+      promptFile: tempDir.path(".ralph/prompt.md"),
+      pluginFile: tempDir.path(".opencode/plugin/ralph-write-guardrail.ts"),
+      agentsFile: tempDir.path("AGENTS.md"),
+      gitignoreFile: tempDir.path(".gitignore"),
+    });
+
+    const prd = await Bun.file(tempDir.path(".ralph/prd.json")).json() as { items: any[] };
+    expect(prd.items[0].verifications).toEqual([
+      {
+        type: "file_exact_content",
+        path: "alpha.txt",
+        content: "alpha",
+        allowTrailingNewline: false,
+      },
+    ]);
+  });
+
+  it("should extract colon and named-file verification", async () => {
+    const planPath = await tempDir.write(
+      "plan.md",
+      "# Plan\n\n- [ ] Create a file named `beta.txt` containing exactly: `beta`.\n"
+    );
+
+    await runInit({
+      planFile: planPath,
+      progressFile: tempDir.path(".ralph/progress.txt"),
+      promptFile: tempDir.path(".ralph/prompt.md"),
+      pluginFile: tempDir.path(".opencode/plugin/ralph-write-guardrail.ts"),
+      agentsFile: tempDir.path("AGENTS.md"),
+      gitignoreFile: tempDir.path(".gitignore"),
+    });
+
+    const prd = await Bun.file(tempDir.path(".ralph/prd.json")).json() as { items: any[] };
+    expect(prd.items[0].verifications?.[0]?.path).toBe("beta.txt");
+    expect(prd.items[0].verifications?.[0]?.content).toBe("beta");
+  });
+
+  it("should extract plain unquoted create variant", async () => {
+    const planPath = await tempDir.write(
+      "plan.md",
+      "# Plan\n\n- [ ] Create gamma.txt containing exactly gamma.\n"
+    );
+
+    await runInit({
+      planFile: planPath,
+      progressFile: tempDir.path(".ralph/progress.txt"),
+      promptFile: tempDir.path(".ralph/prompt.md"),
+      pluginFile: tempDir.path(".opencode/plugin/ralph-write-guardrail.ts"),
+      agentsFile: tempDir.path("AGENTS.md"),
+      gitignoreFile: tempDir.path(".gitignore"),
+    });
+
+    const prd = await Bun.file(tempDir.path(".ralph/prd.json")).json() as { items: any[] };
+    expect(prd.items[0].verifications?.[0]?.path).toBe("gamma.txt");
+    expect(prd.items[0].verifications?.[0]?.content).toBe("gamma");
+  });
+
+  it("should extract modify exact variants", async () => {
+    const planPath = await tempDir.write(
+      "plan.md",
+      "# Plan\n\n- [ ] Change `notes.txt` to contain exactly `new`.\n- [ ] Set `notes.txt` to exactly `new`.\n- [ ] Update `notes.txt` to contain exactly: `new`.\n"
+    );
+
+    await runInit({
+      planFile: planPath,
+      progressFile: tempDir.path(".ralph/progress.txt"),
+      promptFile: tempDir.path(".ralph/prompt.md"),
+      pluginFile: tempDir.path(".opencode/plugin/ralph-write-guardrail.ts"),
+      agentsFile: tempDir.path("AGENTS.md"),
+      gitignoreFile: tempDir.path(".gitignore"),
+    });
+
+    const prd = await Bun.file(tempDir.path(".ralph/prd.json")).json() as { items: any[] };
+    for (const item of prd.items) {
+      expect(item.verifications?.[0]?.path).toBe("notes.txt");
+      expect(item.verifications?.[0]?.content).toBe("new");
+    }
+  });
+
+  it("should extract synthesized exact output verification", async () => {
+    const planPath = await tempDir.write(
+      "plan.md",
+      "# Plan\n\n- [ ] Create `combined.txt` containing exactly `left-right`.\n"
+    );
+
+    await runInit({
+      planFile: planPath,
+      progressFile: tempDir.path(".ralph/progress.txt"),
+      promptFile: tempDir.path(".ralph/prompt.md"),
+      pluginFile: tempDir.path(".opencode/plugin/ralph-write-guardrail.ts"),
+      agentsFile: tempDir.path("AGENTS.md"),
+      gitignoreFile: tempDir.path(".gitignore"),
+    });
+
+    const prd = await Bun.file(tempDir.path(".ralph/prd.json")).json() as { items: any[] };
+    expect(prd.items[0].verifications?.[0]?.path).toBe("combined.txt");
+    expect(prd.items[0].verifications?.[0]?.content).toBe("left-right");
+  });
+
+  it("should store contradictory assertions for later rejection", async () => {
+    const planPath = await tempDir.write(
+      "plan.md",
+      "# Plan\n\n- [ ] Create `impossible.txt` containing exactly `alpha` and containing exactly `beta`.\n"
+    );
+
+    await runInit({
+      planFile: planPath,
+      progressFile: tempDir.path(".ralph/progress.txt"),
+      promptFile: tempDir.path(".ralph/prompt.md"),
+      pluginFile: tempDir.path(".opencode/plugin/ralph-write-guardrail.ts"),
+      agentsFile: tempDir.path("AGENTS.md"),
+      gitignoreFile: tempDir.path(".gitignore"),
+    });
+
+    const prd = await Bun.file(tempDir.path(".ralph/prd.json")).json() as { items: any[] };
+    expect(prd.items[0].verifications).toHaveLength(2);
+    expect(prd.items[0].verifications?.[0]?.path).toBe("impossible.txt");
+    expect(prd.items[0].verifications?.[1]?.path).toBe("impossible.txt");
+    expect(prd.items[0].verifications?.[0]?.content).toBe("alpha");
+    expect(prd.items[0].verifications?.[1]?.content).toBe("beta");
+  });
+
+  it("should keep ambiguous tasks without deterministic verification", async () => {
+    const planPath = await tempDir.write("plan.md", "# Plan\n\n- [ ] Improve README.\n");
+
+    await runInit({
+      planFile: planPath,
+      progressFile: tempDir.path(".ralph/progress.txt"),
+      promptFile: tempDir.path(".ralph/prompt.md"),
+      pluginFile: tempDir.path(".opencode/plugin/ralph-write-guardrail.ts"),
+      agentsFile: tempDir.path("AGENTS.md"),
+      gitignoreFile: tempDir.path(".gitignore"),
+    });
+
+    const prd = await Bun.file(tempDir.path(".ralph/prd.json")).json() as { items: any[] };
+    expect(prd.items[0].description).toBe("Improve README.");
+    expect(prd.items[0].verifications).toBeUndefined();
+  });
+
+  it("should ignore unsafe path assertions from markdown init", async () => {
+    const planPath = await tempDir.write(
+      "plan.md",
+      "# Plan\n\n- [ ] Create `..\\outside.txt` containing exactly `bad`.\n"
+    );
+
+    await runInit({
+      planFile: planPath,
+      progressFile: tempDir.path(".ralph/progress.txt"),
+      promptFile: tempDir.path(".ralph/prompt.md"),
+      pluginFile: tempDir.path(".opencode/plugin/ralph-write-guardrail.ts"),
+      agentsFile: tempDir.path("AGENTS.md"),
+      gitignoreFile: tempDir.path(".gitignore"),
+    });
+
+    const prd = await Bun.file(tempDir.path(".ralph/prd.json")).json() as { items: any[] };
+    expect(prd.items[0].description).toContain("..\\outside.txt");
+    expect(prd.items[0].verifications).toBeUndefined();
   });
 
   it("should handle checkmarked tasks and categories in markdown plan", async () => {
@@ -57,8 +251,8 @@ describe("runInit", () => {
 1. Numbered item without checkbox
 `
     );
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
 
@@ -71,7 +265,7 @@ describe("runInit", () => {
       gitignoreFile: tempDir.path(".gitignore"),
     });
 
-    const prdPath = tempDir.path("prd.json");
+    const prdPath = tempDir.path(".ralph/prd.json");
     const prdContent = await Bun.file(prdPath).json();
     
     // Some tasks might be deduplicated if they are very similar
@@ -103,8 +297,8 @@ Key Assumptions:
 - [ ] Implement Logic
 `
     );
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
 
@@ -117,7 +311,7 @@ Key Assumptions:
       gitignoreFile: tempDir.path(".gitignore"),
     });
 
-    const prdPath = tempDir.path("prd.json");
+    const prdPath = tempDir.path(".ralph/prd.json");
     const prdContent = await Bun.file(prdPath).json();
     
     // Should NOT include Summary, assumptions, or table rows
@@ -142,8 +336,8 @@ Key Assumptions:
 - [ ] Sample task name (starts with Sample)
 `
     );
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
 
@@ -156,7 +350,7 @@ Key Assumptions:
       gitignoreFile: tempDir.path(".gitignore"),
     });
 
-    const prdPath = tempDir.path("prd.json");
+    const prdPath = tempDir.path(".ralph/prd.json");
     const prdContent = await Bun.file(prdPath).json();
     
     // All 3 should be kept because they have [ ]
@@ -180,8 +374,8 @@ Key Assumptions:
    1. [ ] Numbered Child
 `
     );
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsFile = tempDir.path("AGENTS.md");
 
@@ -194,7 +388,7 @@ Key Assumptions:
       gitignoreFile: tempDir.path(".gitignore"),
     });
 
-    const prdPath = tempDir.path("prd.json");
+    const prdPath = tempDir.path(".ralph/prd.json");
     const prdContent = await Bun.file(prdPath).json();
     
     const descriptions = prdContent.items.map((i: any) => i.description);
@@ -213,9 +407,9 @@ Key Assumptions:
 
   it("should use plan.md when no args and prd.json does not exist", async () => {
     await tempDir.write("plan.md", "# Plan\n- [ ] First task\n- [ ] Second task\n");
-    const prdPath = tempDir.path("prd.json");
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const prdPath = tempDir.path(".ralph/prd.json");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
 
@@ -243,8 +437,8 @@ Key Assumptions:
 
   it("should add frontmatter marker to generated prompt file", async () => {
     const planPath = await tempDir.write("plan.md", "# Plan\n- [ ] Task\n");
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
 
@@ -264,11 +458,11 @@ Key Assumptions:
 
   it("should include sourceFile in PRD metadata when initialized from a source", async () => {
     const planPath = await tempDir.write("plan.md", "# Plan\n- [ ] Task\n");
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
-    const prdPath = tempDir.path("prd.json");
+    const prdPath = tempDir.path(".ralph/prd.json");
 
     await runInit({
       planFile: planPath,
@@ -285,8 +479,8 @@ Key Assumptions:
 
   it("should create plugin file with marker in .opencode/plugin directory", async () => {
     const planPath = await tempDir.write("plan.md", "# Plan\n- [ ] Task\n");
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
 
@@ -307,7 +501,7 @@ Key Assumptions:
     expect(isGeneratedPlugin(pluginContent)).toBe(true);
     expect(pluginContent).toContain("@opencode-ai/plugin");
     expect(pluginContent).toContain("tool.execute.before");
-    expect(pluginContent).toContain("prd.json");
+    expect(pluginContent).toContain(".ralph/prd.json");
     expect(pluginContent).toContain("AGENTS.md");
 
     expect(result.created).toContain(pluginPath);
@@ -315,8 +509,8 @@ Key Assumptions:
 
   it("should create AGENTS.md with marker when it doesn't exist", async () => {
     const planPath = await tempDir.write("plan.md", "# Plan\n- [ ] Task\n");
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
 
@@ -343,8 +537,8 @@ Key Assumptions:
 
   it("should NEVER overwrite existing AGENTS.md even with --force", async () => {
     const planPath = await tempDir.write("plan.md", "# Plan\n- [ ] Task\n");
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     
     // Create an existing AGENTS.md with custom content
@@ -369,8 +563,8 @@ Key Assumptions:
 
   it("should respect --force for plugin file but not for AGENTS.md", async () => {
     const planPath = await tempDir.write("plan.md", "# Plan\n- [ ] Task\n");
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     
     // Create existing plugin file
     const { mkdirSync } = await import("fs");
@@ -406,8 +600,8 @@ Key Assumptions:
 
   it("should create new .gitignore with Ralph entries when it doesn't exist", async () => {
     const planPath = await tempDir.write("plan.md", "# Plan\n- [ ] Task\n");
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
     const gitignorePath = tempDir.path(".gitignore");
@@ -435,8 +629,8 @@ Key Assumptions:
 
   it("should append Ralph entries to existing .gitignore without duplicates", async () => {
     const planPath = await tempDir.write("plan.md", "# Plan\n- [ ] Task\n");
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
     
@@ -471,18 +665,24 @@ Key Assumptions:
 
   it("should skip .gitignore when all Ralph entries already present", async () => {
     const planPath = await tempDir.write("plan.md", "# Plan\n- [ ] Task\n");
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
     
     // Create .gitignore that already has all Ralph entries
     const existingContent = `node_modules/
-.env
-# Ralph - AI agent loop files
-.ralph*
-.opencode/plugin/ralph-write-guardrail.ts
-`;
+  .env
+  # Ralph - AI agent loop files
+  .ralph/logs/
+  .ralph/tmp/
+  .ralph/validation/
+  .ralph/state.json
+  .ralph/done
+  .ralph/pause
+  .ralph/lock
+  .opencode/plugin/ralph-write-guardrail.ts
+  `;
     const gitignorePath = await tempDir.write(".gitignore", existingContent);
 
     const result = await runInit({
@@ -507,14 +707,14 @@ Key Assumptions:
 
   it("should only add missing Ralph entries to .gitignore", async () => {
     const planPath = await tempDir.write("plan.md", "# Plan\n- [ ] Task\n");
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
     
     // Create .gitignore that already has some Ralph entries
     const existingContent = `node_modules/
-.ralph-state.json
+.ralph/state.json
 `;
     const gitignorePath = await tempDir.write(".gitignore", existingContent);
 
@@ -537,8 +737,8 @@ Key Assumptions:
       expect(gitignoreContent).toContain(entry);
     }
     
-    // Count occurrences of .ralph-state.json - should only appear once
-    const matches = gitignoreContent.match(/\.ralph-state\.json/g);
+    // Count occurrences of .ralph/state.json - should only appear once
+    const matches = gitignoreContent.match(/\.ralph\/state\.json/g);
     expect(matches?.length).toBe(1);
     
     expect(result.created).toContain(gitignorePath);
@@ -547,8 +747,8 @@ Key Assumptions:
 
   it("should handle .gitignore without trailing newline", async () => {
     const planPath = await tempDir.write("plan.md", "# Plan\n- [ ] Task\n");
-    const progressPath = tempDir.path("progress.txt");
-    const promptPath = tempDir.path(".ralph-prompt.md");
+    const progressPath = tempDir.path(".ralph/progress.txt");
+    const promptPath = tempDir.path(".ralph/prompt.md");
     const pluginPath = tempDir.path(".opencode/plugin/ralph-write-guardrail.ts");
     const agentsPath = tempDir.path("AGENTS.md");
     
@@ -714,3 +914,4 @@ This is my custom configuration file.`;
     expect(isGeneratedAgents(content)).toBe(false);
   });
 });
+

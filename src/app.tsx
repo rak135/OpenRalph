@@ -24,7 +24,7 @@ import { detectInstalledTerminals, launchTerminal, getAttachCommand as getAttach
 import { copyToClipboard, detectClipboardTool } from "./lib/clipboard";
 import { loadConfig, setPreferredTerminal, getAllFallbackAgents, setFallbackAgent, removeFallbackAgent, updateConfig } from "./lib/config";
 
-import { parsePlan, parsePlanTasks, savePlanTasks, type Task } from "./plan";
+import { savePlanTasks, type Task } from "./plan";
 import { layout } from "./components/tui-theme";
 import type { DetailsViewMode, UiTask } from "./components/tui-types";
 import type { TaskStatus } from "./types/task-status";
@@ -37,6 +37,8 @@ import { log } from "./lib/log";
 import { addSteeringContext, createDebugSession } from "./loop";
 import { createLoopState, type LoopStateStore } from "./hooks/useLoopState";
 import { createLoopStats, type LoopStatsStore } from "./hooks/useLoopStats";
+import { getPausePath } from "./lib/paths";
+import { loadOperatorUiSnapshot, type OperatorUiSnapshot } from "./ui/operator-state";
 
 import { InterruptHandler } from "./lib/interrupt";
 
@@ -286,6 +288,7 @@ export function App(props: AppProps) {
   // Tasks panel state signals
   const [showTasks, setShowTasks] = createSignal(true);
   const [tasks, setTasks] = createSignal<Task[]>([]);
+  const [operatorSnapshot, setOperatorSnapshot] = createSignal<OperatorUiSnapshot | null>(null);
   // Whether to show completed tasks in the task list (default: false for optimization)
   const [showCompletedTasks, setShowCompletedTasks] = createSignal(false);
 
@@ -295,24 +298,34 @@ export function App(props: AppProps) {
 
   // Function to refresh tasks from plan file
   const refreshTasks = async () => {
-    if (!props.options.planFile) {
-      return;
-    }
-
-    const { done, total, error } = await parsePlan(props.options.planFile);
-    const parsed = await parsePlanTasks(props.options.planFile);
-    setTasks(parsed);
+    const snapshot = await loadOperatorUiSnapshot({
+      workspaceDir: process.cwd(),
+      planFile: props.options.planFile,
+      progressFile: props.options.progressFile,
+      allowLegacyFallback: true,
+    });
+    setTasks(snapshot.tasks);
+    setOperatorSnapshot(snapshot);
 
     setStateAndRender((prev) => {
-      if (prev.tasksComplete === done && prev.totalTasks === total && prev.planError === error) {
+      if (
+        prev.tasksComplete === snapshot.done &&
+        prev.totalTasks === snapshot.total &&
+        prev.planError === snapshot.planError
+      ) {
         return prev;
       }
-      return { ...prev, tasksComplete: done, totalTasks: total, planError: error };
+      return {
+        ...prev,
+        tasksComplete: snapshot.done,
+        totalTasks: snapshot.total,
+        planError: snapshot.planError,
+      };
     });
 
     const loopState = loopStore.state();
-    if (loopState.tasksComplete !== done || loopState.totalTasks !== total) {
-      loopStore.dispatch({ type: "SET_TASKS", complete: done, total });
+    if (loopState.tasksComplete !== snapshot.done || loopState.totalTasks !== snapshot.total) {
+      loopStore.dispatch({ type: "SET_TASKS", complete: snapshot.done, total: snapshot.total });
     }
   };
 
@@ -388,7 +401,7 @@ export function App(props: AppProps) {
   });
 
   // Pause file path
-  const PAUSE_FILE = ".ralph-pause";
+  const PAUSE_FILE = getPausePath(process.cwd());
 
   // Toggle pause by creating/deleting .ralph-pause file
   const togglePause = async () => {
@@ -454,6 +467,7 @@ export function App(props: AppProps) {
               showTasks={showTasks}
               setShowTasks={setShowTasks}
                tasks={tasks}
+               operatorSnapshot={operatorSnapshot}
                showCompletedTasks={showCompletedTasks}
                setShowCompletedTasks={setShowCompletedTasks}
                stagedTaskStatuses={stagedTaskStatuses}
@@ -491,6 +505,7 @@ type AppContentProps = {
   showTasks: () => boolean;
   setShowTasks: (v: boolean) => void;
   tasks: () => Task[];
+  operatorSnapshot: Accessor<OperatorUiSnapshot | null>;
   showCompletedTasks: () => boolean;
   setShowCompletedTasks: (v: boolean) => void;
   stagedTaskStatuses: Accessor<Record<string, TaskStatus>>;
@@ -679,19 +694,22 @@ function AppContent(props: AppContentProps) {
   const allUiTasks = createMemo<UiTask[]>(() =>
     props.tasks().map((task) => {
       const stagedStatus = props.stagedTaskStatuses()[task.id];
-      const status = stagedStatus || (task.done ? "done" : "actionable");
+      const status = stagedStatus || task.status || (task.verifierFeedback ? "error" : task.done ? "done" : "actionable");
       
       return {
         id: task.id,
         title: task.text,
         status: status as TaskStatus,
         line: task.line,
+        description: task.description ?? task.text,
         priority: task.priority,
         category: task.category,
         effort: task.effort,
         risk: task.risk,
         originalId: task.originalId,
         steps: task.steps,
+        verifications: task.verifications,
+        verifierFeedback: task.verifierFeedback,
       };
     })
   );
@@ -1788,6 +1806,7 @@ function AppContent(props: AppContentProps) {
         <RightPanel
           selectedTask={selectedTask()}
           viewMode={detailsViewMode()}
+          runtimeSnapshot={props.operatorSnapshot()}
           status={props.state().status}
           adapterMode={props.state().adapterMode ?? "sdk"}
           events={props.state().events}

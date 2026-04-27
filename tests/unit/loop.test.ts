@@ -1,11 +1,14 @@
-import { describe, it, expect, mock } from "bun:test";
-import { buildPrompt, parseModel, validateAndNormalizeServerUrl, checkServerHealth, connectToExternalServer, calculateBackoffMs, stripFrontmatter } from "../../src/loop.js";
+﻿import { describe, it, expect, mock } from "bun:test";
+import { buildPrompt, parseModel, validateAndNormalizeServerUrl, checkServerHealth, connectToExternalServer, calculateBackoffMs, stripFrontmatter, evaluateAllDoneDecision } from "../../src/loop.js";
 import type { LoopOptions } from "../../src/state.js";
+import os from "os";
+import { mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 describe("buildPrompt", () => {
   const createOptions = (overrides: Partial<LoopOptions> = {}): LoopOptions => ({
     planFile: "plan.md",
-    progressFile: "progress.txt",
+    progressFile: ".ralph/progress.txt",
     model: "anthropic/claude-opus-4",
     prompt: "Default prompt with {plan} and {progress}",
     ...overrides,
@@ -105,11 +108,10 @@ describe("buildPrompt", () => {
       });
       const result = await buildPrompt(options);
       // Verify it uses the default prompt with {plan} substituted
-      expect(result).toContain("READ all of plan.md");
-      expect(result).toContain("progress.txt");
-      expect(result).toContain("Pick ONE task");
-      expect(result).toContain("update AGENTS.md");
-      expect(result).toContain(".ralph-done");
+      expect(result).toContain("complete exactly ONE unfinished task from plan.md");
+      expect(result).toContain("Do not merely summarize plan.md or .ralph/progress.txt");
+      expect(result).toContain("Read plan.md and .ralph/progress.txt only as needed");
+      expect(result).toContain(".ralph/done");
       expect(result).toContain("NEVER GIT PUSH");
       // Verify {plan} was replaced
       expect(result).not.toContain("{plan}");
@@ -121,10 +123,9 @@ describe("buildPrompt", () => {
         prompt: undefined,
       });
       const result = await buildPrompt(options);
-      // The default prompt has two {plan} occurrences - both should be replaced
-      expect(result).toContain("READ all of docs/custom-plan.md");
-      expect(result).toContain("Update docs/custom-plan.md");
-      expect(result).toContain("progress.txt");
+      expect(result).toContain("complete exactly ONE unfinished task from docs/custom-plan.md");
+      expect(result).toContain("Do not merely summarize docs/custom-plan.md or .ralph/progress.txt");
+      expect(result).toContain("Read docs/custom-plan.md and .ralph/progress.txt only as needed");
       expect(result).not.toContain("{plan}");
     });
 
@@ -135,7 +136,7 @@ describe("buildPrompt", () => {
       });
       const result = await buildPrompt(options);
       // Verify it uses the default prompt
-      expect(result).toContain("READ all of plan.md");
+      expect(result).toContain("complete exactly ONE unfinished task from plan.md");
     });
 
     it("should use DEFAULT_PROMPT when options.prompt is whitespace only", async () => {
@@ -145,7 +146,7 @@ describe("buildPrompt", () => {
       });
       const result = await buildPrompt(options);
       // Verify it uses the default prompt
-      expect(result).toContain("READ all of plan.md");
+      expect(result).toContain("complete exactly ONE unfinished task from plan.md");
     });
   });
 
@@ -153,7 +154,7 @@ describe("buildPrompt", () => {
     it("should prefer --prompt over --prompt-file", async () => {
       const options = createOptions({
         prompt: "Explicit prompt {plan}",
-        promptFile: ".ralph-prompt.md", // File doesn't exist, but --prompt takes precedence anyway
+        promptFile: ".ralph/prompt.md", // File doesn't exist, but --prompt takes precedence anyway
       });
       const result = await buildPrompt(options);
       expect(result).toBe("Explicit prompt plan.md");
@@ -185,7 +186,58 @@ describe("buildPrompt", () => {
       });
       const result = await buildPrompt(options);
       // Should fall back to DEFAULT_PROMPT
-      expect(result).toContain("READ all of plan.md");
+      expect(result).toContain("complete exactly ONE unfinished task from plan.md");
+    });
+
+    it("should prepend verifier feedback when present in prd.json", async () => {
+      const tempFile = `${os.tmpdir()}/ralph-plan-${Date.now()}.json`;
+      await Bun.write(
+        tempFile,
+        JSON.stringify(
+          {
+            items: [
+              {
+                description: "Create alpha.txt containing exactly alpha",
+                passes: false,
+                verifierFeedback: {
+                  generatedAt: new Date().toISOString(),
+                  contradiction: false,
+                  summary: "Verifier rejected task",
+                  failures: [
+                    {
+                      path: "alpha.txt",
+                      expected: "alpha",
+                      actual: "alpha\n",
+                      actualDisplay: '"alpha\\n"',
+                      reason: "Trailing newline is not allowed for this task.",
+                      correction:
+                        'Rewrite alpha.txt so it contains exactly "alpha" and no trailing newline.',
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          null,
+          2
+        )
+      );
+
+      try {
+        const result = await buildPrompt(
+          createOptions({
+            planFile: tempFile,
+            prompt: undefined,
+          })
+        );
+        expect(result).toContain("DETERMINISTIC VERIFIER FEEDBACK");
+        expect(result).toContain("You must fix these verifier failures before selecting any new task.");
+        expect(result).toContain('"alpha\\n"');
+        expect(result).toContain("Trailing newline is not allowed for this task.");
+        expect(result).toContain("Do not add a trailing newline unless the expected content includes one.");
+      } finally {
+        await Bun.file(tempFile).delete?.();
+      }
     });
   });
 });
@@ -517,7 +569,7 @@ Custom prompt: process {plan}`;
     try {
       const options = {
         planFile: "plan.md",
-        progressFile: "progress.txt",
+        progressFile: ".ralph/progress.txt",
         model: "anthropic/claude-opus-4",
         prompt: undefined,
         promptFile: tempFile,
@@ -532,3 +584,112 @@ Custom prompt: process {plan}`;
     }
   });
 });
+
+describe("evaluateAllDoneDecision", () => {
+  it("rejects all-done shortcut when deterministic verification fails", async () => {
+    const workspace = join(os.tmpdir(), `ralph-all-done-${Date.now()}-mismatch`);
+    mkdirSync(workspace, { recursive: true });
+
+    try {
+      const planFile = join(workspace, ".ralph", "prd.json");
+      mkdirSync(join(workspace, ".ralph"), { recursive: true });
+
+      await Bun.write(join(workspace, "alpha.txt"), "alpha\n");
+      await Bun.write(
+        planFile,
+        JSON.stringify(
+          {
+            metadata: {
+              generated: true,
+              generator: "ralph-init",
+              createdAt: new Date().toISOString(),
+            },
+            items: [
+              {
+                description: "Create alpha.txt containing exactly alpha",
+                passes: true,
+                verifications: [
+                  {
+                    type: "file_exact_content",
+                    path: "alpha.txt",
+                    content: "alpha",
+                    allowTrailingNewline: false,
+                  },
+                ],
+              },
+            ],
+          },
+          null,
+          2
+        )
+      );
+
+      const result = await evaluateAllDoneDecision(planFile, workspace, {
+        done: 1,
+        total: 1,
+      });
+
+      expect(result.shouldComplete).toBe(false);
+      expect(result.tasksRejected).toBe(1);
+
+      const prd = JSON.parse(await Bun.file(planFile).text());
+      expect(prd.items[0].passes).toBe(false);
+      expect(prd.items[0].verifierFeedback.failures[0].reason).toContain("Trailing newline is not allowed");
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("allows all-done shortcut when deterministic verification passes", async () => {
+    const workspace = join(os.tmpdir(), `ralph-all-done-${Date.now()}-exact`);
+    mkdirSync(workspace, { recursive: true });
+
+    try {
+      const planFile = join(workspace, ".ralph", "prd.json");
+      mkdirSync(join(workspace, ".ralph"), { recursive: true });
+
+      await Bun.write(join(workspace, "alpha.txt"), "alpha");
+      await Bun.write(
+        planFile,
+        JSON.stringify(
+          {
+            metadata: {
+              generated: true,
+              generator: "ralph-init",
+              createdAt: new Date().toISOString(),
+            },
+            items: [
+              {
+                description: "Create alpha.txt containing exactly alpha",
+                passes: true,
+                verifications: [
+                  {
+                    type: "file_exact_content",
+                    path: "alpha.txt",
+                    content: "alpha",
+                    allowTrailingNewline: false,
+                  },
+                ],
+              },
+            ],
+          },
+          null,
+          2
+        )
+      );
+
+      const result = await evaluateAllDoneDecision(planFile, workspace, {
+        done: 1,
+        total: 1,
+      });
+
+      expect(result.tasksRejected).toBe(0);
+      expect(result.shouldComplete).toBe(true);
+      expect(result.refreshed.done).toBe(1);
+      expect(result.refreshed.total).toBe(1);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+});
+

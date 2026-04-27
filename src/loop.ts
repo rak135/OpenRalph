@@ -3,7 +3,7 @@ import { getAdapter, initializeAdapters } from "./adapters/registry.js";
 import type { LoopOptions, PersistedState, SessionInfo, ToolEvent } from "./state.js";
 import type { SandboxConfig, RateLimitState, ActiveAgentState } from "./components/tui-types";
 import { getHeadHash, getCommitsSince, getDiffStats } from "./git.js";
-import { parsePlan, validatePlanCompletion } from "./plan.js";
+import { parsePlan, parsePrdItems, validatePlanCompletion } from "./plan.js";
 import { log, checkMemoryThreshold } from "./lib/log";
 import { rateLimitDetector, getFallbackAgent } from "./lib/rate-limit";
 import { stripAnsiCodes } from "./lib/ansi";
@@ -11,8 +11,34 @@ import { killRegisteredProcesses, registerSpawnedProcess, unregisterSpawnedProce
 
 
 import { ErrorHandler, ErrorContext } from "./lib/error-handler";
+import { rejectFalseCompletions, runDeterministicVerificationGate } from "./verifier";
+import { getDonePath, getPausePath, getProgressPath } from "./lib/paths";
 
-const DEFAULT_PROMPT = `READ all of {plan} and {progress}. Pick ONE task with passes=false (prefer highest-risk/highest-impact). Keep changes small: one logical change per commit. Update {plan} by setting passes=true and adding notes or steps as needed. Append a brief entry to {progress} with what changed and why. Run feedback loops before committing: bun run typecheck, bun test, bun run lint (if missing, note it in {progress} and continue). Commit change (update {plan} in the same commit). ONLY do one task unless GLARINGLY OBVIOUS steps should run together. Quality bar: production code, maintainable, tests when appropriate. If you learn a critical operational detail, update AGENTS.md. When ALL tasks complete, create .ralph-done and output <promise>COMPLETE</promise>. NEVER GIT PUSH. ONLY COMMIT.`;
+const DEFAULT_PROMPT = `You are operating inside the current workspace.
+
+Your job is to complete exactly ONE unfinished task from {plan} by making real filesystem changes.
+
+Some tasks include deterministic verifications in {plan}.
+For exact-content file tasks, satisfy those verifications byte-for-byte.
+For exact-content file tasks, write exactly the requested content. Do not add a trailing newline unless the expected content explicitly includes one. Exact means byte-for-byte exact.
+Ralph will reject passes=true if deterministic verification fails.
+
+Do not merely summarize {plan} or {progress}.
+Do not stop after reading files.
+Read {plan} and {progress} only as needed to identify the next unfinished task and existing progress.
+
+Then:
+1. Select exactly one task with passes=false.
+2. Perform the task with real filesystem changes.
+3. Verify the changed files.
+4. Update {plan} according to the Ralph workflow.
+5. Append a brief {progress} entry.
+6. Commit the change if appropriate.
+7. Stop after one logical task unless completion is glaringly obvious.
+
+When all tasks are complete, create .ralph/done and output <promise>COMPLETE</promise>.
+
+NEVER GIT PUSH. ONLY COMMIT.`;
 
 
 const steeringContext: string[] = [];
@@ -26,6 +52,56 @@ export function addSteeringContext(message: string): void {
 function applySteeringContext(prompt: string): string {
   if (steeringContext.length === 0) return prompt;
   return `${prompt}\n\nAdditional context from user:\n${steeringContext.join("\n")}`;
+}
+
+async function buildVerifierFeedbackPrompt(planFile: string): Promise<string> {
+  const file = Bun.file(planFile);
+  if (!(await file.exists())) return "";
+
+  const content = await file.text();
+  const items = parsePrdItems(content);
+  if (!items) return "";
+
+  const failures = items
+    .map((item) => ({ description: item.description, feedback: item.verifierFeedback }))
+    .filter(
+      (item): item is { description: string; feedback: NonNullable<(typeof items)[number]["verifierFeedback"]> } =>
+        Boolean(item.feedback && item.feedback.failures.length > 0)
+    );
+
+  if (failures.length === 0) return "";
+
+  const sections = failures.flatMap((item, index) => {
+    return item.feedback.failures.map((failure, failureIndex) => {
+      const ordinal = index + failureIndex + 1;
+      return [
+        `Failure ${ordinal}:`,
+        `Task: ${item.description}`,
+        `Path: ${failure.path}`,
+        "Expected exact content:",
+        JSON.stringify(failure.expected),
+        "Actual content:",
+        failure.actualDisplay,
+        `Reason: ${failure.reason}`,
+        "Correction required:",
+        failure.correction,
+      ].join("\n");
+    });
+  });
+
+  return [
+    "DETERMINISTIC VERIFIER FEEDBACK",
+    "",
+    "The previous iteration was rejected by Ralph's deterministic verifier.",
+    "You must fix these verifier failures before selecting any new task.",
+    "",
+    sections.join("\n\n"),
+    "",
+    "Important:",
+    "Rewrite the file to match the expected exact content byte-for-byte.",
+    "Do not add a trailing newline unless the expected content includes one.",
+    "Do not mark the task complete until verifier passes.",
+  ].join("\n");
 }
 
 const DEFAULT_PORT = 4190;
@@ -65,7 +141,7 @@ export function calculateBackoffMs(attempt: number): number {
 }
 
 /**
- * Check if .ralph-done exists and handle completion logic.
+ * Check if .ralph/done exists and handle completion logic.
  * @returns true if valid (should exit), false if invalid (should continue)
  */
 async function checkAndHandleDoneFile(
@@ -73,20 +149,33 @@ async function checkAndHandleDoneFile(
   debug: boolean | undefined,
   callbacks: LoopCallbacks
 ): Promise<boolean> {
-  const doneFile = Bun.file(".ralph-done");
+  const doneFilePath = getDonePath(process.cwd());
+  const doneFile = Bun.file(doneFilePath);
   if (await doneFile.exists()) {
+    // Run deterministic verifier before accepting .ralph/done.
+    // This resets any false-passed tasks (model exactness drift, contradictions).
+    const gateResult = await runDeterministicVerificationGate(planFile, process.cwd(), doneFilePath);
+    if (gateResult.report.tasksRejected > 0) {
+      log("loop", `Verifier rejected ${gateResult.report.tasksRejected} tasks — invalidating .ralph/done`, {
+        rejected: gateResult.report.tasksRejected,
+        checked: gateResult.report.tasksChecked,
+        doneFileInvalidated: gateResult.doneFileInvalidated,
+      });
+      return false;
+    }
+
     const isValid = await validatePlanCompletion(planFile);
     if (isValid) {
-      log("loop", debug ? ".ralph-done validated, completing" : ".ralph-done found, completing");
+      log("loop", debug ? ".ralph/done validated, completing" : ".ralph/done found, completing");
       await doneFile.delete();
       callbacks.onComplete();
       return true;
     } else {
       if (debug) {
         const { done, total } = await parsePlan(planFile);
-        log("loop", `WARNING: Premature .ralph-done detected. Only ${done}/${total} tasks complete. Continuing iteration.`);
+        log("loop", `WARNING: Premature .ralph/done detected. Only ${done}/${total} tasks complete. Continuing iteration.`);
       } else {
-        log("loop", "Premature .ralph-done detected, continuing iteration");
+        log("loop", "Premature .ralph/done detected, continuing iteration");
       }
       await doneFile.delete();
       return false;
@@ -487,14 +576,61 @@ export async function buildPrompt(options: LoopOptions): Promise<string> {
     template = DEFAULT_PROMPT;
   }
 
-  const progressFile = options.progressFile || "progress.txt";
+  const progressFile = options.progressFile || getProgressPath(process.cwd());
 
   // Replace both {plan} and {{PLAN_FILE}} placeholders
-  return template
+  const rendered = template
     .replace(/\{plan\}/g, options.planFile)
     .replace(/\{\{PLAN_FILE\}\}/g, options.planFile)
     .replace(/\{progress\}/g, progressFile)
     .replace(/\{\{PROGRESS_FILE\}\}/g, progressFile);
+
+  const verifierFeedback = await buildVerifierFeedbackPrompt(options.planFile);
+  return verifierFeedback ? `${verifierFeedback}\n\n${rendered}` : rendered;
+}
+
+export type AllDoneDecision = {
+  shouldComplete: boolean;
+  tasksRejected: number;
+  refreshed: {
+    done: number;
+    total: number;
+    error?: string;
+  };
+};
+
+export async function evaluateAllDoneDecision(
+  planFile: string,
+  workspaceDir: string,
+  progress: {
+    done: number;
+    total: number;
+    error?: string;
+  }
+): Promise<AllDoneDecision> {
+  const base = {
+    done: progress.done,
+    total: progress.total,
+    error: progress.error,
+  };
+
+  if (!(progress.total > 0 && progress.done === progress.total && !progress.error)) {
+    return { shouldComplete: false, tasksRejected: 0, refreshed: base };
+  }
+
+  const gateResult = await runDeterministicVerificationGate(planFile, workspaceDir);
+  const refreshed = await parsePlan(planFile);
+
+  if (gateResult.report.tasksRejected > 0) {
+    return {
+      shouldComplete: false,
+      tasksRejected: gateResult.report.tasksRejected,
+      refreshed,
+    };
+  }
+
+  const shouldComplete = refreshed.total > 0 && refreshed.done === refreshed.total && !refreshed.error;
+  return { shouldComplete, tasksRejected: 0, refreshed };
 }
 
 /**
@@ -580,7 +716,7 @@ async function waitWhilePaused(
     onResume?: () => Promise<void>;
   }
 ): Promise<boolean> {
-  const pauseFilePath = ".ralph-pause";
+  const pauseFilePath = getPausePath(process.cwd());
   if (!(await Bun.file(pauseFilePath).exists())) {
     if (pauseState.value) {
       pauseState.value = false;
@@ -947,7 +1083,7 @@ export async function runLoop(
     // Check if pause file exists at startup - if so, start in paused state
 
     // to avoid calling onPause() callback (which would override "ready" status)
-    const pauseFileExistsAtStart = await Bun.file(".ralph-pause").exists();
+    const pauseFileExistsAtStart = await Bun.file(getPausePath(process.cwd())).exists();
     const pauseState: PauseState = { value: pauseFileExistsAtStart };
     let previousCommitCount = await getCommitsSince(persistedState.initialCommitHash);
     
@@ -963,12 +1099,12 @@ export async function runLoop(
 
     // Main loop
     while (!signal.aborted) {
-      // Check for .ralph-done file at start of each iteration
+      // Check for .ralph/done file at start of each iteration
       if (await checkAndHandleDoneFile(options.planFile, options.debug, callbacks)) {
         break;
       }
 
-      // Check for .ralph-pause file
+      // Check for .ralph/pause file
       if (await waitWhilePaused(pauseState, callbacks, signal)) {
         if (signal.aborted) break;
         continue;
@@ -1013,10 +1149,25 @@ export async function runLoop(
           log("loop", "Plan parsed", { done, total, error });
           callbacks.onTasksUpdated(done, total, error);
           
-          // Early exit: If all tasks are complete, don't start a new session
-          // This prevents the loop from continuing when the PRD shows all tasks done
-          if (total > 0 && done === total && !error) {
-            log("loop", "All tasks complete - exiting loop early", { done, total });
+          const allDoneDecision = await evaluateAllDoneDecision(options.planFile, process.cwd(), {
+            done,
+            total,
+            error,
+          });
+          if (allDoneDecision.tasksRejected > 0) {
+            log("loop", "All-done shortcut blocked by deterministic verifier", {
+              rejected: allDoneDecision.tasksRejected,
+            });
+            callbacks.onTasksUpdated(
+              allDoneDecision.refreshed.done,
+              allDoneDecision.refreshed.total,
+              allDoneDecision.refreshed.error
+            );
+          } else if (allDoneDecision.shouldComplete) {
+            log("loop", "All tasks complete - exiting loop early", {
+              done: allDoneDecision.refreshed.done,
+              total: allDoneDecision.refreshed.total,
+            });
             callbacks.onComplete();
             break;
           }
@@ -1565,7 +1716,7 @@ async function runPtyLoop(
   let iteration = persistedState.iterationTimes.length;
   let currentModel = options.model;
   let isOnFallback = false;
-  const pauseFileExistsAtStart = await Bun.file(".ralph-pause").exists();
+  const pauseFileExistsAtStart = await Bun.file(getPausePath(process.cwd())).exists();
 
   const pauseState: PauseState = { value: pauseFileExistsAtStart };
   let previousCommitCount = await getCommitsSince(persistedState.initialCommitHash);
@@ -1618,10 +1769,25 @@ async function runPtyLoop(
         log("loop", "Plan parsed", { done, total, error });
         callbacks.onTasksUpdated(done, total, error);
         
-        // Early exit: If all tasks are complete, don't start a new session
-        // This prevents the loop from continuing when the PRD shows all tasks done
-        if (total > 0 && done === total && !error) {
-          log("loop", "PTY: All tasks complete - exiting loop early", { done, total });
+        const allDoneDecision = await evaluateAllDoneDecision(options.planFile, process.cwd(), {
+          done,
+          total,
+          error,
+        });
+        if (allDoneDecision.tasksRejected > 0) {
+          log("loop", "PTY all-done shortcut blocked by deterministic verifier", {
+            rejected: allDoneDecision.tasksRejected,
+          });
+          callbacks.onTasksUpdated(
+            allDoneDecision.refreshed.done,
+            allDoneDecision.refreshed.total,
+            allDoneDecision.refreshed.error
+          );
+        } else if (allDoneDecision.shouldComplete) {
+          log("loop", "PTY: All tasks complete - exiting loop early", {
+            done: allDoneDecision.refreshed.done,
+            total: allDoneDecision.refreshed.total,
+          });
           callbacks.onComplete();
           break;
         }
@@ -1740,6 +1906,32 @@ async function runPtyLoop(
       }
 
       const iterationDuration = Date.now() - iterationStartTime;
+      // Deterministic verifier: reset any false-passed tasks before recording completion
+      if (!options.debug) {
+        try {
+          const gateResult = await runDeterministicVerificationGate(options.planFile, process.cwd());
+          if (gateResult.report.tasksRejected > 0) {
+            log("loop", "PTY verifier rejected false completions", {
+              iteration,
+              rejected: gateResult.report.tasksRejected,
+              checked: gateResult.report.tasksChecked,
+              doneFileInvalidated: gateResult.doneFileInvalidated,
+            });
+            callbacks.onEvent({
+              iteration,
+              type: "reasoning",
+              icon: "thought",
+              text: `[verifier] rejected ${gateResult.report.tasksRejected} false completion(s) — task(s) reset`,
+              timestamp: Date.now(),
+            });
+          }
+        } catch (verifierErr) {
+          log("loop", "Verifier error (non-fatal)", {
+            error: verifierErr instanceof Error ? verifierErr.message : String(verifierErr),
+          });
+        }
+      }
+
       const totalCommits = await getCommitsSince(persistedState.initialCommitHash);
       const commitsThisIteration = totalCommits - previousCommitCount;
       previousCommitCount = totalCommits;

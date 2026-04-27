@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
-import { join } from 'path';
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
+import { dirname, join } from 'path';
 
 /** Default lock file name used for session locking */
-export const LOCK_FILE = ".ralph-lock";
+export const LOCK_FILE = ".ralph/lock";
 
 export interface LockFile {
   pid: number;
@@ -21,7 +21,7 @@ export class SessionLock {
   private lockPath: string;
   private lockData: LockFile | null = null;
   
-  constructor(cwd: string, lockFileName: string = '.ralph-lock') {
+  constructor(cwd: string, lockFileName: string = LOCK_FILE) {
     this.lockPath = join(cwd, lockFileName);
   }
   
@@ -53,6 +53,7 @@ export class SessionLock {
       }
       
       // Create new lock
+      mkdirSync(dirname(this.lockPath), { recursive: true });
       this.lockData = {
         pid: process.pid,
         sessionId: this.generateSessionId(),

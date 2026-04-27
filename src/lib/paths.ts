@@ -11,6 +11,113 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 
+// ============================================================================
+// Workspace runtime path helpers
+// ============================================================================
+
+export const RALPH_DIR = ".ralph";
+
+export const LEGACY_PLAN_FILE = "prd.json";
+export const LEGACY_PROGRESS_FILE = "progress.txt";
+export const LEGACY_PROMPT_FILE = ".ralph-prompt.md";
+export const LEGACY_STATE_FILE = ".ralph-state.json";
+export const LEGACY_DONE_FILE = ".ralph-done";
+
+export function getRalphDir(workspace: string = process.cwd()): string {
+  return join(workspace, RALPH_DIR);
+}
+
+export function getPlanPath(workspace: string = process.cwd()): string {
+  return join(getRalphDir(workspace), "prd.json");
+}
+
+export function getProgressPath(workspace: string = process.cwd()): string {
+  return join(getRalphDir(workspace), "progress.txt");
+}
+
+export function getPromptPath(workspace: string = process.cwd()): string {
+  return join(getRalphDir(workspace), "prompt.md");
+}
+
+export function getStateFilePath(workspace: string = process.cwd()): string {
+  return join(getRalphDir(workspace), "state.json");
+}
+
+export function getDonePath(workspace: string = process.cwd()): string {
+  return join(getRalphDir(workspace), "done");
+}
+
+export function getPausePath(workspace: string = process.cwd()): string {
+  return join(getRalphDir(workspace), "pause");
+}
+
+export function getLockPath(workspace: string = process.cwd()): string {
+  return join(getRalphDir(workspace), "lock");
+}
+
+export function getLogsDir(workspace: string = process.cwd()): string {
+  return join(getRalphDir(workspace), "logs");
+}
+
+export function getTmpDir(workspace: string = process.cwd()): string {
+  return join(getRalphDir(workspace), "tmp");
+}
+
+export function getReportsDir(workspace: string = process.cwd()): string {
+  return join(getRalphDir(workspace), "reports");
+}
+
+export function getValidationDir(workspace: string = process.cwd()): string {
+  return join(getRalphDir(workspace), "validation");
+}
+
+export function getLegacyPlanPath(workspace: string = process.cwd()): string {
+  return join(workspace, LEGACY_PLAN_FILE);
+}
+
+export function getLegacyProgressPath(workspace: string = process.cwd()): string {
+  return join(workspace, LEGACY_PROGRESS_FILE);
+}
+
+export function getLegacyPromptPath(workspace: string = process.cwd()): string {
+  return join(workspace, LEGACY_PROMPT_FILE);
+}
+
+export function getLegacyStatePath(workspace: string = process.cwd()): string {
+  return join(workspace, LEGACY_STATE_FILE);
+}
+
+export function getLegacyDonePath(workspace: string = process.cwd()): string {
+  return join(workspace, LEGACY_DONE_FILE);
+}
+
+export function ensureRalphWorkspaceDirs(workspace: string = process.cwd()): void {
+  for (const dir of [
+    getRalphDir(workspace),
+    getLogsDir(workspace),
+    getTmpDir(workspace),
+    getReportsDir(workspace),
+    getValidationDir(workspace),
+  ]) {
+    mkdirSync(dir, { recursive: true });
+  }
+}
+
+export async function resolveCanonicalOrLegacyPath(
+  canonicalPath: string,
+  legacyPath: string
+): Promise<{ path: string; usedLegacy: boolean }> {
+  if (await Bun.file(canonicalPath).exists()) {
+    return { path: canonicalPath, usedLegacy: false };
+  }
+
+  if (await Bun.file(legacyPath).exists()) {
+    return { path: legacyPath, usedLegacy: true };
+  }
+
+  return { path: canonicalPath, usedLegacy: false };
+}
+
 /** Current platform for path resolution */
 const platform = process.platform;
 

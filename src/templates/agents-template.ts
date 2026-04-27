@@ -64,9 +64,11 @@ This file contains critical operational details that AI agents should know when 
 
 The following files are protected by the Ralph write-guardrail plugin and should not be directly modified by AI:
 
-- \`prd.json\` - PRD plan file (update via Ralph workflow)
-- \`progress.txt\` - Progress tracking (append via Ralph workflow)
-- \`.ralph-prompt.md\` - Prompt template
+- \`.ralph/prd.json\` - PRD plan file (update via Ralph workflow)
+- \`.ralph/progress.txt\` - Progress tracking (append via Ralph workflow)
+- \`.ralph/prompt.md\` - Prompt template
+- \`.ralph/state.json\` - Runtime state
+- \`prd.json\`, \`progress.txt\`, \`.ralph-prompt.md\` - Legacy paths (read-only compatibility)
 - \`AGENTS.md\` - This file
 
 ## References

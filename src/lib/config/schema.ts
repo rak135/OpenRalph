@@ -8,9 +8,9 @@ export const ErrorHandlingSchema = z.object({
 });
 
 export const SessionSchema = z.object({
-  lockFile: z.string().default('.ralph-lock'),
+  lockFile: z.string().default('.ralph/lock'),
   persistenceEnabled: z.boolean().default(false),
-  logDirectory: z.string().default('.ralph-logs'),
+  logDirectory: z.string().default('.ralph/logs'),
 });
 
 export const UISchema = z.object({
@@ -34,10 +34,10 @@ export const ConfigSchema = z.object({
   // Core settings
   model: z.string().default('opencode/claude-opus-4-5'),
   adapter: z.enum(['opencode-server', 'opencode-run', 'codex']).default('opencode-server'),
-  plan: z.string().default('prd.json'),
-  progress: z.string().default('progress.txt'),
+  plan: z.string().default('.ralph/prd.json'),
+  progress: z.string().default('.ralph/progress.txt'),
   prompt: z.string().optional(),
-  promptFile: z.string().default('.ralph-prompt.md'),
+  promptFile: z.string().default('.ralph/prompt.md'),
   server: z.string().url().optional(),
   serverTimeout: z.number().positive().default(5000),
   agent: z.string().optional(),
@@ -65,9 +65,9 @@ export const ConfigSchema = z.object({
   
   // Session settings
   session: SessionSchema.default({
-    lockFile: '.ralph-lock',
+    lockFile: '.ralph/lock',
     persistenceEnabled: false,
-    logDirectory: '.ralph-logs',
+    logDirectory: '.ralph/logs',
   }),
   
   // UI settings

@@ -2,7 +2,7 @@ import type { PtyProcess, PtyOptions } from "./types";
 import { log } from "../lib/log";
 
 export function spawnPty(command: string[], options: PtyOptions = {}): PtyProcess {
-  const { cols = 80, rows = 24, cwd = process.cwd(), env = {} } = options;
+  const { cols = 80, rows = 24, cwd = process.cwd(), env = {}, stdinMode = "pipe" } = options;
 
   const dataCallbacks: Array<(data: string) => void> = [];
   const exitCallbacks: Array<(info: { exitCode: number; signal?: number }) => void> = [];
@@ -106,7 +106,7 @@ export function spawnPty(command: string[], options: PtyOptions = {}): PtyProces
     proc = Bun.spawn(command, {
       cwd,
       env: combinedEnv,
-      stdin: "pipe",
+      stdin: stdinMode,
       stdout: "pipe",
       stderr: "pipe",
     });

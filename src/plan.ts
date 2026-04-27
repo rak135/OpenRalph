@@ -5,6 +5,36 @@ import type { TaskStatus } from "./types/task-status";
  * Plan file parser for openralph
  */
 
+/**
+ * A deterministic file-content assertion extracted from a task description.
+ * Used by the verifier to check disk state after each iteration.
+ */
+export type FileAssertion = {
+  type: "file_exact_content";
+  /** Relative path from workspace root. Must not escape the workspace. */
+  path: string;
+  /** Expected exact content (without trailing newline unless allowTrailingNewline is true). */
+  content: string;
+  /** If true, a single trailing newline in the actual file is acceptable. */
+  allowTrailingNewline: boolean;
+};
+
+export type VerifierFeedbackFailure = {
+  path: string;
+  expected: string;
+  actual: string | null;
+  actualDisplay: string;
+  reason: string;
+  correction: string;
+};
+
+export type VerifierFeedback = {
+  generatedAt: string;
+  contradiction: boolean;
+  summary: string;
+  failures: VerifierFeedbackFailure[];
+};
+
 export type PrdItem = {
   /** Custom task identifier (e.g., "1.1.1") - if not provided, uses array index */
   id?: string;
@@ -17,6 +47,10 @@ export type PrdItem = {
   effort?: string;
   /** Risk level (e.g., "L", "M", "H" for Low/Medium/High) */
   risk?: string;
+  /** Deterministic file-content assertions extracted from the task description during init. */
+  verifications?: FileAssertion[];
+  /** Durable verifier rejection details used to drive the next correction attempt. */
+  verifierFeedback?: VerifierFeedback;
 };
 
 
@@ -45,6 +79,8 @@ export type Task = {
   line: number;
   /** Task text without the checkbox prefix */
   text: string;
+  /** Full task description for PRD-backed tasks */
+  description?: string;
   /** Whether the task is completed */
   done: boolean;
   /** Task priority (0-4) */
@@ -61,6 +97,10 @@ export type Task = {
   originalId?: string;
   /** Verification steps from PRD */
   steps?: string[];
+  /** Deterministic exact-content assertions from PRD */
+  verifications?: FileAssertion[];
+  /** Durable verifier rejection details from PRD */
+  verifierFeedback?: VerifierFeedback;
 };
 
 
@@ -123,6 +163,14 @@ function normalizePrdItems(data: unknown): PrdItem[] | null {
       status: typeof candidate.status === "string" ? (candidate.status as TaskStatus) : undefined,
       effort: typeof candidate.effort === "string" ? candidate.effort : undefined,
       risk: typeof candidate.risk === "string" ? candidate.risk : undefined,
+      // Preserve verifications if already present (backwards-compatible optional field)
+      verifications: Array.isArray(candidate.verifications)
+        ? (candidate.verifications as FileAssertion[])
+        : undefined,
+      verifierFeedback:
+        candidate.verifierFeedback && typeof candidate.verifierFeedback === "object"
+          ? (candidate.verifierFeedback as VerifierFeedback)
+          : undefined,
     });
   }
 
@@ -207,12 +255,15 @@ export async function parsePlanTasks(path: string): Promise<Task[]> {
         id: taskId,
         line: index + 1,
         text: item.description,
+        description: item.description,
         done: item.passes,
         category: item.category,
         status: item.status,
         effort: item.effort,
         risk: item.risk,
         steps: item.steps,
+        verifications: item.verifications,
+        verifierFeedback: item.verifierFeedback,
         // Store original custom ID for matching during save
         originalId: item.id,
       };
